@@ -1330,8 +1330,9 @@ archivo_pagos = st.sidebar.file_uploader("Subí el Reporte de Pagos (.csv o .xls
 
 if archivo_pagos is not None:
     try:
+        # Se agrega el parámetro encoding='latin1' para evitar el error de decodificación en caracteres especiales
         if archivo_pagos.name.endswith('.csv'):
-            df_pagos = pd.read_csv(archivo_pagos, skiprows=6, skipinitialspace=True)
+            df_pagos = pd.read_csv(archivo_pagos, skiprows=6, skipinitialspace=True, encoding='latin1')
         else:
             df_pagos = pd.read_excel(archivo_pagos, skiprows=6)
             
