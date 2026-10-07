@@ -4,10 +4,9 @@ from st_aggrid import AgGrid, GridOptionsBuilder
 import plotly.express as px
 
 st.set_page_config(page_title="Tablero de Pagos ObSBA", layout="wide")
+st.title("📊 Tablero de Pagos Diario y Acumulado - ObSBA")
 
-# ==========================================
-# 1. DICCIONARIO INTERNO DE RUBROS
-# ==========================================
+# 1. DICCIONARIO INTERNO DE RUBROS (Base para el cruce)
 @st.cache_data
 def cargar_diccionario_rubros():
     texto_rubros = """
@@ -1422,7 +1421,7 @@ if archivo_pagos is not None:
             col1, col2 = st.columns([2, 1])
             
             with col1:
-                st.subheader("Matriz Desplegable")
+                st.subheader("Matriz Desplegable por Rubro")
                 gb = GridOptionsBuilder.from_dataframe(df_resumen)
                 gb.configure_column('Rubro', rowGroup=True, hide=True)
                 gb.configure_column('Imp.OP', type=["numericColumn", "numberColumnFilter", "customNumericFormat"], precision=2)
