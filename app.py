@@ -4,9 +4,10 @@ from st_aggrid import AgGrid, GridOptionsBuilder
 import plotly.express as px
 
 st.set_page_config(page_title="Tablero de Pagos ObSBA", layout="wide")
-st.title("📊 Tablero de Control de Pagos - ObSBA")
 
+# ==========================================
 # 1. DICCIONARIO INTERNO DE RUBROS
+# ==========================================
 @st.cache_data
 def cargar_diccionario_rubros():
     texto_rubros = """
@@ -212,7 +213,7 @@ def cargar_diccionario_rubros():
 19348 - REDES DEL SUR PRESTACIONES SRL
 5997 - COLEGIO DEL ROBLE
 11781 - PER SE SA
-5200 - A.E.D.I.N
+5200 - A.E.D.IN
 21321 - RUTERAS ESPECIALES SRL
 4744 - CREI SRL
 10122 - BARRIOS CELIA
@@ -1324,13 +1325,15 @@ def cargar_diccionario_rubros():
 
 df_rubros_maestro = cargar_diccionario_rubros()
 
+# ==========================================
 # 2. CARGA DEL REPORTE DEL SISTEMA
+# ==========================================
 st.sidebar.header("Carga de Datos")
 archivo_pagos = st.sidebar.file_uploader("Subí el Reporte de Pagos (.csv o .xlsx)", type=['csv', 'xlsx'])
 
 if archivo_pagos is not None:
     try:
-        # Se agrega el parámetro encoding='latin1' para evitar el error de decodificación en caracteres especiales
+        # A. LECTURA DEL ARCHIVO Y LIMPIEZA INICIAL
         if archivo_pagos.name.endswith('.csv'):
             df_pagos = pd.read_csv(archivo_pagos, skiprows=6, skipinitialspace=True, encoding='latin1', sep=';')
         else:
@@ -1339,60 +1342,107 @@ if archivo_pagos is not None:
         df_pagos.columns = df_pagos.columns.str.strip()
         df_pagos = df_pagos.dropna(how='all') 
         
-        # 3. CORTE DEL BLOQUE FINAL
+        # B. CORTE DEL BLOQUE FINAL
         col_busqueda = df_pagos.columns[0]
         mask_totales = df_pagos[col_busqueda].astype(str).str.contains('MEP:|TOTAL:|Cheque:', case=False, na=False)
         
         if mask_totales.any():
             indice_corte = mask_totales.idxmax()
             df_pagos = df_pagos.loc[:indice_corte - 1].copy()
-            st.sidebar.success("El cuadro resumen final fue excluido correctamente.")
+            st.sidebar.success("✅ Cuadro resumen excluido correctamente.")
             
+        # C. EXTRACCIÓN DEL NÚMERO DE ENTE PARA EL CRUCE (CORRECCIÓN ".0")
         if 'Benef.OP' in df_pagos.columns:
-            df_pagos['Ente'] = df_pagos['Benef.OP'].astype(str).str.split(' ', n=1).str[0].str.strip()
+            # Forzamos a string, quitamos el '.0' si Pandas lo detectó como decimal y eliminamos espacios
+            df_pagos['Ente'] = df_pagos['Benef.OP'].astype(str).str.replace(r'\.0$', '', regex=True).str.split(' ', n=1).str[0].str.strip()
         else:
             st.error("No se encontró la columna 'Benef.OP'.")
             st.stop()
             
-        # 4. CRUCE DE DATOS
+        # D. LIMPIEZA NUMÉRICA Y FORMATO FECHAS
+        columnas_dinero = ['Imp.OP', 'Imp.Neto', 'Imp.Ret.']
+        for col in columnas_dinero:
+            if col in df_pagos.columns:
+                if df_pagos[col].dtype == object:
+                    df_pagos[col] = df_pagos[col].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
+                df_pagos[col] = pd.to_numeric(df_pagos[col], errors='coerce').fillna(0)
+                
+        if 'Fecha Pago' in df_pagos.columns:
+             df_pagos['Fecha Pago'] = pd.to_datetime(df_pagos['Fecha Pago'], errors='coerce')
+
+        # E. CRUCE DE DATOS CON EL DICCIONARIO
         df_final = pd.merge(df_pagos, df_rubros_maestro, on='Ente', how='left')
         df_final['Rubro'] = df_final['Rubro'].fillna('SIN RUBRO')
         
-        prestadores_nuevos = df_final[df_final['Rubro'] == 'SIN RUBRO']['Benef.OP'].dropna().unique()
+        # Asignar nombre del prestador legible para que no salga solo el número
+        df_final['Prestador'] = df_final['Nombre_Referencia'].fillna('Desc. (' + df_final['Ente'] + ')')
+        
+        prestadores_nuevos = df_final[df_final['Rubro'] == 'SIN RUBRO']['Prestador'].dropna().unique()
         if len(prestadores_nuevos) > 0:
-            with st.expander("⚠️ Prestadores no encontrados en el Diccionario (SIN RUBRO)"):
+            with st.sidebar.expander("⚠️ Ver Prestadores SIN RUBRO"):
                 st.write(prestadores_nuevos)
 
-        columnas_dinero = ['Imp.OP', 'Imp.Neto', 'Imp.Ret.']
-        for col in columnas_dinero:
-            if col in df_final.columns:
-                if df_final[col].dtype == object:
-                    df_final[col] = df_final[col].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
-                df_final[col] = pd.to_numeric(df_final[col], errors='coerce').fillna(0)
-                
-        # 5. VISUALIZACIÓN
-        st.markdown("---")
-        st.header("Análisis de Pagos por Rubro")
+        # ==========================================
+        # 3. INTERFAZ DE USUARIO: SOLAPAS Y FILTROS
+        # ==========================================
         
-        df_resumen = df_final.groupby(['Rubro', 'Benef.OP'])[['Imp.OP', 'Imp.Neto']].sum().reset_index()
+        # BÚSQUEDA GENERAL
+        st.markdown("### 🔍 Buscador de Prestador")
+        busqueda = st.text_input("Escribí el nombre o número de ente del prestador para filtrar ambos tableros:")
         
-        col1, col2 = st.columns([2, 1])
-        
-        with col1:
-            st.subheader("Matriz Desplegable por Rubro")
-            gb = GridOptionsBuilder.from_dataframe(df_resumen)
-            gb.configure_column('Rubro', rowGroup=True, hide=True)
-            gb.configure_column('Imp.OP', type=["numericColumn", "numberColumnFilter", "customNumericFormat"], precision=2)
-            gb.configure_column('Imp.Neto', type=["numericColumn", "numberColumnFilter", "customNumericFormat"], precision=2)
-            grid_options = gb.build()
-            AgGrid(df_resumen, gridOptions=grid_options, height=400, theme='streamlit')
+        if busqueda:
+            df_final = df_final[df_final['Prestador'].str.contains(busqueda, case=False, na=False) | 
+                                df_final['Ente'].str.contains(busqueda, case=False, na=False)]
 
-        with col2:
-            st.subheader("Participación (Bruto)")
-            df_torta = df_final.groupby('Rubro')['Imp.OP'].sum().reset_index()
-            fig = px.pie(df_torta, values='Imp.OP', names='Rubro', hole=0.4)
-            fig.update_traces(textposition='inside', textinfo='percent+label')
-            st.plotly_chart(fig, use_container_width=True)
+        # SEPARACIÓN DE DATOS (DÍA VS ACUMULADO)
+        if 'Fecha Pago' in df_final.columns and not df_final.empty:
+            fecha_maxima = df_final['Fecha Pago'].max()
+            df_dia = df_final[df_final['Fecha Pago'] == fecha_maxima].copy()
+            fecha_str = fecha_maxima.strftime("%d/%m/%Y")
+        else:
+            df_dia = df_final.copy()
+            fecha_str = "Desconocida"
+
+        # CREACIÓN DE SOLAPAS (TABS)
+        tab1, tab2 = st.tabs([f"📅 Pagos del Día ({fecha_str})", "📈 Acumulado Histórico"])
+        
+        def render_tablero(df_mostrar):
+            if df_mostrar.empty:
+                st.info("No hay datos para mostrar con este filtro.")
+                return
+
+            total_gastado = df_mostrar['Imp.OP'].sum()
+            st.metric(label="Total Gastado (Bruto)", value=f"$ {total_gastado:,.2f}")
+            
+            st.markdown("---")
+            st.header("Análisis por Rubro")
+            
+            df_resumen = df_mostrar.groupby(['Rubro', 'Prestador'])[['Imp.OP', 'Imp.Neto']].sum().reset_index()
+            
+            col1, col2 = st.columns([2, 1])
+            
+            with col1:
+                st.subheader("Matriz Desplegable")
+                gb = GridOptionsBuilder.from_dataframe(df_resumen)
+                gb.configure_column('Rubro', rowGroup=True, hide=True)
+                gb.configure_column('Imp.OP', type=["numericColumn", "numberColumnFilter", "customNumericFormat"], precision=2)
+                gb.configure_column('Imp.Neto', type=["numericColumn", "numberColumnFilter", "customNumericFormat"], precision=2)
+                grid_options = gb.build()
+                AgGrid(df_resumen, gridOptions=grid_options, height=400, theme='streamlit')
+
+            with col2:
+                st.subheader("Participación (Bruto)")
+                df_torta = df_mostrar.groupby('Rubro')['Imp.OP'].sum().reset_index()
+                fig = px.pie(df_torta, values='Imp.OP', names='Rubro', hole=0.4)
+                fig.update_traces(textposition='inside', textinfo='percent+label')
+                st.plotly_chart(fig, use_container_width=True)
+
+        # Renderizar cada solapa
+        with tab1:
+            render_tablero(df_dia)
+            
+        with tab2:
+            render_tablero(df_final)
 
     except Exception as e:
         st.error(f"Error procesando los datos: {e}")
