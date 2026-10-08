@@ -14,10 +14,10 @@ st.title("📊 Tablero de Pagos Diario y Acumulado - ObSBA")
 # ==========================================
 @st.cache_data
 def cargar_diccionario_rubros():
-    archivo_txt = "categorias.txt"
+    archivo_txt = "categorías de prestadores.txt"
     
     if not os.path.exists(archivo_txt):
-        st.error(f"⚠️ No se encontró el archivo '{archivo_txt}'. Asegurate de haberlo subido al repositorio.")
+        st.error(f"⚠️ No se encontró el archivo '{archivo_txt}'. Asegurate de haberlo subido al repositorio con ese nombre exacto.")
         return pd.DataFrame(columns=['Ente', 'Rubro', 'Nombre_Referencia']), {}
 
     try:
@@ -59,7 +59,6 @@ df_rubros_maestro, dict_nombres = cargar_diccionario_rubros()
 # 2. FUNCIONES DE FORMATO 
 # ==========================================
 def formatear_moneda(valor):
-    """Aplica formato argentino: $ 1.234.567,89"""
     try:
         return f"$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except:
@@ -177,17 +176,37 @@ if archivo_pagos is not None:
                 st.info("No hay datos para mostrar.")
                 return
 
-            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-            col_m1.metric("Total Gastado (Bruto)", formatear_moneda(df_mostrar['Imp.OP'].sum()))
-            col_m2.metric("Total Gastado (Neto)", formatear_moneda(df_mostrar['Imp.Neto'].sum()))
-            col_m3.metric("Total Retenciones", formatear_moneda(df_mostrar['Imp.Ret.'].sum()))
-            if col_anul:
-                col_m4.metric("Total Imp.Anul.", formatear_moneda(df_mostrar[col_anul].sum()))
+            st.markdown("---")
+            st.header("Análisis por Rubro")
             
-            if es_acumulado and not df_mostrar['Fecha_Obj'].dropna().empty:
+            # Selector de rubro
+            lista_rubros = ['Todos'] + sorted(df_mostrar['Rubro'].unique().tolist())
+            clave_filtro = "filtro_rubro_acum" if es_acumulado else "filtro_rubro_dia"
+            rubro_sel = st.selectbox("Seleccioná un rubro para filtrar la tabla, el gráfico evolutivo y las métricas:", lista_rubros, key=clave_filtro)
+            
+            # DataFrame reactivo al selector
+            if rubro_sel != 'Todos':
+                df_reactivo = df_mostrar[df_mostrar['Rubro'] == rubro_sel]
+            else:
+                df_reactivo = df_mostrar
+
+            if df_reactivo.empty:
+                st.warning("No hay pagos para el rubro seleccionado.")
+                return
+
+            # MÉTTRICAS REACTIVAS AL SELECTOR
+            col_m1, col_m2, col_m3, col_m4 = st.columns(4)
+            col_m1.metric("Total Gastado (Bruto)", formatear_moneda(df_reactivo['Imp.OP'].sum()))
+            col_m2.metric("Total Gastado (Neto)", formatear_moneda(df_reactivo['Imp.Neto'].sum()))
+            col_m3.metric("Total Retenciones", formatear_moneda(df_reactivo['Imp.Ret.'].sum()))
+            if col_anul:
+                col_m4.metric("Total Imp.Anul.", formatear_moneda(df_reactivo[col_anul].sum()))
+            
+            # GRÁFICO EVOLUTIVO REACTIVO
+            if es_acumulado and not df_reactivo['Fecha_Obj'].dropna().empty:
                 st.markdown("---")
                 st.subheader("Evolución Diaria de Pagos")
-                df_evo = df_mostrar.groupby('Fecha_Obj')[columnas_dinero].sum().reset_index().sort_values('Fecha_Obj')
+                df_evo = df_reactivo.groupby('Fecha_Obj')[columnas_dinero].sum().reset_index().sort_values('Fecha_Obj')
                 
                 fig_evo = go.Figure()
                 nombres = {'Imp.OP': 'Total Bruto', 'Imp.Neto': 'Total Neto', 'Imp.Ret.': 'Retenciones', col_anul: 'Anulaciones'}
@@ -207,54 +226,32 @@ if archivo_pagos is not None:
                 )
                 st.plotly_chart(fig_evo, use_container_width=True)
 
-            st.markdown("---")
-            st.header("Análisis por Rubro")
-            
-            lista_rubros = ['Todos'] + sorted(df_mostrar['Rubro'].unique().tolist())
-            clave_filtro = "filtro_rubro_acum" if es_acumulado else "filtro_rubro_dia"
-            rubro_sel = st.selectbox("Seleccioná un rubro (sólo filtrará la tabla desplegable):", lista_rubros, key=clave_filtro)
-            
-            # df_tabla se filtra para la Matriz, df_mostrar se mantiene intacto para el Gráfico de Torta
-            if rubro_sel != 'Todos':
-                df_tabla = df_mostrar[df_mostrar['Rubro'] == rubro_sel]
-            else:
-                df_tabla = df_mostrar
-
             col_tabla, col_grafico = st.columns([2, 1])
             
             with col_tabla:
                 st.subheader("Matriz Desplegable por Rubro")
-                if not df_tabla.empty:
-                    df_resumen = df_tabla.groupby(['Rubro', 'Prestador'])[columnas_dinero].sum().reset_index()
-                    df_resumen = df_resumen[(df_resumen[columnas_dinero] != 0).any(axis=1)]
-                    
-                    # Renombramos la columna para que figure explícitamente en la tabla
-                    df_resumen.rename(columns={'Rubro': 'Categoría'}, inplace=True)
-                    
-                    gb = GridOptionsBuilder.from_dataframe(df_resumen)
-                    # Al poner hide=False, la columna se mantiene visible al lado del grupo
-                    gb.configure_column('Categoría', rowGroup=True, hide=False)
-                    for col in columnas_dinero:
-                        gb.configure_column(col, type=["numericColumn"], valueFormatter=formato_pesos)
-                    grid_options = gb.build()
-                    AgGrid(df_resumen, gridOptions=grid_options, height=450, theme='streamlit', allow_unsafe_jscode=True)
-                else:
-                    st.warning("No hay pagos para el rubro seleccionado.")
+                df_resumen = df_reactivo.groupby(['Rubro', 'Prestador'])[columnas_dinero].sum().reset_index()
+                df_resumen = df_resumen[(df_resumen[columnas_dinero] != 0).any(axis=1)]
+                
+                df_resumen.rename(columns={'Rubro': 'Categoría'}, inplace=True)
+                
+                gb = GridOptionsBuilder.from_dataframe(df_resumen)
+                gb.configure_column('Categoría', rowGroup=True, hide=False)
+                for col in columnas_dinero:
+                    gb.configure_column(col, type=["numericColumn"], valueFormatter=formato_pesos)
+                grid_options = gb.build()
+                AgGrid(df_resumen, gridOptions=grid_options, height=450, theme='streamlit', allow_unsafe_jscode=True)
 
             with col_grafico:
-                st.subheader("Participación (Bruto)")
-                # Utilizamos df_mostrar (sin filtrar) para que la torta siempre quede fija al 100%
+                st.subheader("Participación Global (Bruto)")
+                # Gráfico Torta siempre muestra el global, indiferente a la selección del rubro.
                 df_torta = df_mostrar.groupby('Rubro')['Imp.OP'].sum().reset_index()
                 df_torta = df_torta[df_torta['Imp.OP'] > 0]
                 
                 if not df_torta.empty:
-                    # Aplicamos el formato argentino como un dato extra en el DataFrame del gráfico
                     df_torta['Monto_Format'] = df_torta['Imp.OP'].apply(formatear_moneda)
-                    
                     fig_torta = px.pie(df_torta, values='Imp.OP', names='Rubro', hole=0.4,
                                        custom_data=['Monto_Format'])
-                    
-                    # Inyectamos el customdata formateado en la etiqueta emergente (tooltip)
                     fig_torta.update_traces(
                         textposition='inside', 
                         textinfo='percent+label', 
@@ -272,7 +269,7 @@ if archivo_pagos is not None:
             render_tablero(df_final, es_acumulado=True)
 
         # ==========================================
-        # 5. BUSCADOR DETALLADO 
+        # 5. BUSCADOR DETALLADO UBICADO ABAJO
         # ==========================================
         st.markdown("---")
         st.header("🔍 Buscador Detallado de Prestador")
