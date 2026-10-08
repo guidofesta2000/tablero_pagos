@@ -14,13 +14,12 @@ st.title("📊 Tablero de Pagos Diario y Acumulado - ObSBA")
 # ==========================================
 @st.cache_data
 def cargar_diccionario_rubros():
-    archivo_txt = "categorias.txt"
+    archivo_txt = "categorías de prestadores.txt"
     
     if not os.path.exists(archivo_txt):
-        st.error(f"⚠️ No se encontró el archivo '{archivo_txt}'. Por favor, subilo a tu repositorio en GitHub.")
+        st.error(f"⚠️ No se encontró el archivo '{archivo_txt}'. Asegurate de que el nombre coincida exactamente.")
         return pd.DataFrame(columns=['Ente', 'Rubro', 'Nombre_Referencia']), {}
 
-    # Leemos el archivo soportando caracteres especiales (tildes, ñ)
     try:
         with open(archivo_txt, "r", encoding="utf-8") as f:
             lineas = [l.strip() for l in f.readlines() if l.strip()]
@@ -34,7 +33,6 @@ def cargar_diccionario_rubros():
     for linea in lineas:
         if linea.startswith("▸"):
             rubro_actual = linea.replace("▸", "").strip()
-        # Evitamos arrastrar la fila de TOTAL GENERAL del txt
         elif "-" in linea and not linea.upper().startswith("TOTAL"):
             partes = linea.split("-", 1)
             if len(partes) == 2:
@@ -45,15 +43,12 @@ def cargar_diccionario_rubros():
     df_diccionario = pd.DataFrame(datos)
     df_diccionario['Ente'] = df_diccionario['Ente'].astype(str).str.strip()
     
-    # Función para normalizar nombres (quita tildes y pasa a mayúscula)
     def clean_str(s):
         if pd.isna(s): return ""
         s = str(s).upper().strip()
         return ''.join(c for c in unicodedata.normalize('NFD', s) if unicodedata.category(c) != 'Mn')
         
     df_diccionario['Nombre_Limpio'] = df_diccionario['Nombre_Referencia'].apply(clean_str)
-    
-    # Creamos un mapa de rescate para buscar por nombre si falla el código
     dict_nombres = df_diccionario.set_index('Nombre_Limpio')['Rubro'].to_dict()
     
     return df_diccionario, dict_nombres
@@ -100,13 +95,11 @@ if archivo_pagos is not None:
         df_pagos.columns = df_pagos.columns.str.strip()
         df_pagos = df_pagos.dropna(how='all')
         
-        # ELIMINAR BASURA ABSOLUTA Y TOTALES FINALES
         filtro_basura = df_pagos.astype(str).apply(lambda col: col.str.contains('TOTAL|MEP|Cheque', case=False, na=False)).any(axis=1)
         if filtro_basura.any():
             df_pagos = df_pagos[~filtro_basura].copy()
             st.sidebar.success("✅ Resumen final excluido.")
             
-        # EXTRACCIÓN DEL ENTE NUMÉRICO Y NOMBRE DEL CSV
         if 'Benef.OP' in df_pagos.columns:
             df_pagos['Ente_Crudo'] = df_pagos['Benef.OP'].astype(str).str.strip()
             df_pagos['Ente'] = df_pagos['Ente_Crudo'].str.extract(r'(^\d+)', expand=False).fillna('')
@@ -124,7 +117,6 @@ if archivo_pagos is not None:
             st.error("No se encontró la columna 'Benef.OP'.")
             st.stop()
             
-        # LIMPIEZA FINANCIERA
         columnas_dinero = ['Imp.OP', 'Imp.Neto', 'Imp.Ret.']
         col_anul = 'Imp.Anul.' if 'Imp.Anul.' in df_pagos.columns else ('Perc. por terceros' if 'Perc. por terceros' in df_pagos.columns else None)
         if col_anul:
@@ -138,20 +130,16 @@ if archivo_pagos is not None:
             else:
                 df_pagos[col] = 0.0 
                 
-        # FECHAS
         if 'Fecha Pago' in df_pagos.columns:
             df_pagos['Fecha_Obj'] = pd.to_datetime(df_pagos['Fecha Pago'], dayfirst=True, errors='coerce')
         else:
             df_pagos['Fecha_Obj'] = pd.NaT
 
-        # CRUCE (MERGE) Y MOTOR DE RESCATE CON NORMALIZACIÓN
         df_final = pd.merge(df_pagos, df_rubros_maestro[['Ente', 'Rubro', 'Nombre_Referencia']], on='Ente', how='left')
         
         def rescatar_rubro(row):
             if pd.notna(row['Rubro']): 
                 return row['Rubro']
-            
-            # Si el cruce numérico falló, normalizamos el nombre y lo buscamos en el diccionario
             nombre_limpio = clean_str(row['Nombre_CSV'])
             if dict_nombres and nombre_limpio in dict_nombres:
                 return dict_nombres[nombre_limpio]
@@ -221,37 +209,50 @@ if archivo_pagos is not None:
             st.markdown("---")
             st.header("Análisis por Rubro")
             
+            # El selector ahora solo afectará a la tabla
             lista_rubros = ['Todos'] + sorted(df_mostrar['Rubro'].unique().tolist())
             clave_filtro = "filtro_rubro_acum" if es_acumulado else "filtro_rubro_dia"
-            rubro_sel = st.selectbox("Seleccioná un rubro para filtrar la tabla y el gráfico:", lista_rubros, key=clave_filtro)
+            rubro_sel = st.selectbox("Seleccioná un rubro para filtrar la tabla:", lista_rubros, key=clave_filtro)
             
             if rubro_sel != 'Todos':
-                df_mostrar = df_mostrar[df_mostrar['Rubro'] == rubro_sel]
-                if df_mostrar.empty:
-                    st.warning("No hay pagos para el rubro seleccionado.")
-                    return
+                df_tabla = df_mostrar[df_mostrar['Rubro'] == rubro_sel]
+            else:
+                df_tabla = df_mostrar
 
-            df_resumen = df_mostrar.groupby(['Rubro', 'Prestador'])[columnas_dinero].sum().reset_index()
-            df_resumen = df_resumen[(df_resumen[columnas_dinero] != 0).any(axis=1)]
-            
             col_tabla, col_grafico = st.columns([2, 1])
             
             with col_tabla:
                 st.subheader("Matriz Desplegable por Rubro")
-                gb = GridOptionsBuilder.from_dataframe(df_resumen)
-                gb.configure_column('Rubro', rowGroup=True, hide=True)
-                for col in columnas_dinero:
-                    gb.configure_column(col, type=["numericColumn"], valueFormatter=formato_pesos)
-                grid_options = gb.build()
-                AgGrid(df_resumen, gridOptions=grid_options, height=450, theme='streamlit', allow_unsafe_jscode=True)
+                if not df_tabla.empty:
+                    df_resumen = df_tabla.groupby(['Rubro', 'Prestador'])[columnas_dinero].sum().reset_index()
+                    df_resumen = df_resumen[(df_resumen[columnas_dinero] != 0).any(axis=1)]
+                    
+                    gb = GridOptionsBuilder.from_dataframe(df_resumen)
+                    
+                    # Permite ver la categoría además de agruparla
+                    gb.configure_column('Rubro', rowGroup=True, hide=False, header_name="Categoría")
+                    
+                    for col in columnas_dinero:
+                        gb.configure_column(col, type=["numericColumn"], valueFormatter=formato_pesos)
+                    grid_options = gb.build()
+                    AgGrid(df_resumen, gridOptions=grid_options, height=450, theme='streamlit', allow_unsafe_jscode=True)
+                else:
+                    st.warning("No hay pagos para el rubro seleccionado.")
 
             with col_grafico:
                 st.subheader("Participación (Bruto)")
+                # El grafico de torta usa 'df_mostrar' entero, ignorando el selectbox de 'rubro_sel'
                 df_torta = df_mostrar.groupby('Rubro')['Imp.OP'].sum().reset_index()
                 df_torta = df_torta[df_torta['Imp.OP'] > 0]
+                
                 if not df_torta.empty:
-                    fig_torta = px.pie(df_torta, values='Imp.OP', names='Rubro', hole=0.4)
-                    fig_torta.update_traces(textposition='inside', textinfo='percent+label', hovertemplate='Rubro: %{label}<br>Monto: $ %{value:,.2f}')
+                    # Aplicamos un string customizado a los datos para que el hover muestre la moneda formateada
+                    df_torta['Importe_Formateado'] = df_torta['Imp.OP'].apply(formatear_moneda)
+                    
+                    fig_torta = px.pie(df_torta, values='Imp.OP', names='Rubro', hole=0.4,
+                                       custom_data=['Importe_Formateado'])
+                    fig_torta.update_traces(textposition='inside', textinfo='percent+label', 
+                                            hovertemplate='<b>%{label}</b><br>Monto: %{customdata[0]}')
                     fig_torta.update_layout(showlegend=False)
                     st.plotly_chart(fig_torta, use_container_width=True)
                 else:
