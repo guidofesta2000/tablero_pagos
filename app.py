@@ -1327,6 +1327,9 @@ def cargar_diccionario_rubros():
 
 df_rubros_maestro = cargar_diccionario_rubros()
 
+# Crear mapa de rescate para "Sin Rubro" (Por Nombre Parcial o Exacto)
+df_rubros_maestro['Nombre_Upper'] = df_rubros_maestro['Nombre_Referencia'].astype(str).str.upper().str.strip()
+dict_nombres = df_rubros_maestro.set_index('Nombre_Upper')['Rubro'].to_dict()
 
 # ==========================================
 # 2. FUNCIONES DE FORMATO
@@ -1337,13 +1340,14 @@ def formatear_moneda(valor):
     except:
         return "$ 0,00"
 
-# Código JavaScript para formatear las columnas numéricas de la tabla (AgGrid)
-formato_pesos = JsCode("""
+# Javascript Inyectable para AgGrid
+formato_pesos = JsCode(r"""
 function(params) {
-    if (params.value == null || isNaN(params.value)) {
-        return '$ 0,00';
-    }
-    return '$ ' + Number(params.value).toLocaleString('es-AR', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+    var val = Number(params.value);
+    if (isNaN(val)) { return "$ 0,00"; }
+    var parts = val.toFixed(2).split(".");
+    parts[0] = parts[0].replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+    return "$ " + parts.join(",");
 }
 """)
 
@@ -1355,7 +1359,7 @@ archivo_pagos = st.sidebar.file_uploader("Subí el Reporte de Pagos (.csv o .xls
 
 if archivo_pagos is not None:
     try:
-        # A. LECTURA Y CORTE (SEPARADOR CORREGIDO A PUNTO Y COMA)
+        # A. LECTURA Y CORTE (SEPARADOR A PUNTO Y COMA)
         if archivo_pagos.name.endswith('.csv'):
             df_pagos = pd.read_csv(archivo_pagos, skiprows=6, skipinitialspace=True, encoding='latin1', sep=';')
         else:
@@ -1364,33 +1368,30 @@ if archivo_pagos is not None:
         df_pagos.columns = df_pagos.columns.str.strip()
         df_pagos = df_pagos.dropna(how='all')
         
-        # ELIMINAR BASURA Y FILAS DE TOTALES: Si la columna de Beneficiario está vacía o dice TOTAL, afuera.
+        # ELIMINAR BASURA TOTAL Y ABSOLUTA QUE APLASTA LOS GRÁFICOS
+        filtro_basura = df_pagos.astype(str).apply(lambda x: x.str.contains('TOTAL|MEP:|Cheque:', case=False)).any(axis=1)
+        if filtro_basura.any():
+            indice_corte = filtro_basura.idxmax()
+            df_pagos = df_pagos.loc[:indice_corte - 1].copy()
+            st.sidebar.success("✅ Resumen final excluido.")
+            
+        # B. EXTRACCIÓN ROBUSTA DE NOMBRES Y ENTES
         if 'Benef.OP' in df_pagos.columns:
-            # Eliminamos cualquier fila donde Benef.OP contenga la palabra Total o MEP
-            filtro_basura = df_pagos['Benef.OP'].astype(str).str.contains('TOTAL|MEP:|Cheque', case=False, na=False)
-            df_pagos = df_pagos[~filtro_basura]
-            # También cortamos el dataframe en la primera aparición de TOTAL en las primeras columnas
-            mask_totales = df_pagos.iloc[:, 0:3].astype(str).apply(lambda col: col.str.contains('MEP:|TOTAL|Cheque:', case=False, na=False)).any(axis=1)
-            if mask_totales.any():
-                indice_corte = mask_totales.idxmax()
-                df_pagos = df_pagos.loc[:indice_corte - 1].copy()
+            df_pagos['Ente_Str'] = df_pagos['Benef.OP'].astype(str).str.replace(r'\.0$', '', regex=True).str.strip()
+            df_pagos['Ente'] = df_pagos['Ente_Str'].str.extract(r'^(\d+)')
+            
+            col_desc = 'Desc.' if 'Desc.' in df_pagos.columns else 'Descripción' if 'Descripción' in df_pagos.columns else None
+            df_pagos['Nombre_CSV_Ext'] = df_pagos['Ente_Str'].str.replace(r'^\d+\s*-?\s*', '', regex=True).str.strip()
+            
+            if col_desc and col_desc in df_pagos.columns:
+                df_pagos['Nombre_CSV'] = df_pagos[col_desc].replace('', pd.NA).fillna(df_pagos['Nombre_CSV_Ext'])
+            else:
+                df_pagos['Nombre_CSV'] = df_pagos['Nombre_CSV_Ext']
         else:
             st.error("No se encontró la columna 'Benef.OP'.")
             st.stop()
             
-        # B. EXTRACCIÓN ROBUSTA DEL ENTE (Regex exacto)
-        # Saca SÓLO los dígitos iniciales. Ej: "8612 FARMANDAT S.A" -> "8612"
-        df_pagos['Ente_Str'] = df_pagos['Benef.OP'].astype(str).str.strip()
-        df_pagos['Ente'] = df_pagos['Ente_Str'].str.extract(r'^(\d+)')[0]
-        
-        # Nombre de respaldo original
-        col_desc = 'Desc.' if 'Desc.' in df_pagos.columns else None
-        df_pagos['Nombre_CSV'] = df_pagos['Ente_Str'].str.replace(r'^\d+\.?\d*\s*-?\s*', '', regex=True).str.strip()
-        if col_desc:
-            df_pagos['Nombre_CSV'] = df_pagos['Nombre_CSV'].replace('', pd.NA).fillna(df_pagos[col_desc])
-        df_pagos['Nombre_CSV'] = df_pagos['Nombre_CSV'].fillna('Prestador Desconocido')
-            
-        # C. LIMPIEZA FINANCIERA SEGURA
+        # C. LIMPIEZA FINANCIERA
         columnas_dinero = ['Imp.OP', 'Imp.Neto', 'Imp.Ret.']
         col_anul = 'Imp.Anul.' if 'Imp.Anul.' in df_pagos.columns else ('Perc. por terceros' if 'Perc. por terceros' in df_pagos.columns else None)
         if col_anul:
@@ -1410,23 +1411,36 @@ if archivo_pagos is not None:
         else:
             df_pagos['Fecha_Obj'] = pd.NaT
 
-        # E. CRUCE (MERGE) Y NOMBRES FINALES
-        df_final = pd.merge(df_pagos, df_rubros_maestro, on='Ente', how='left')
-        df_final['Rubro'] = df_final['Rubro'].fillna('SIN RUBRO')
+        # E. CRUCE (MERGE) Y MOTOR DE RESCATE
+        df_final = pd.merge(df_pagos, df_rubros_maestro[['Ente', 'Rubro', 'Nombre_Referencia']], on='Ente', how='left')
+        
+        def rescatar_rubro(row):
+            if pd.notna(row['Rubro']): return row['Rubro']
+            
+            # Buscar por nombre en el diccionario (Exacto o contenido)
+            nombre = str(row['Nombre_CSV']).upper().strip()
+            if nombre in dict_nombres: return dict_nombres[nombre]
+            
+            for nom_dict, rub_dict in dict_nombres.items():
+                if nom_dict and (nom_dict in nombre or nombre in nom_dict) and len(nombre) > 4:
+                    return rub_dict
+            return 'SIN RUBRO'
+
+        df_final['Rubro'] = df_final.apply(rescatar_rubro, axis=1)
         df_final['Prestador'] = df_final['Nombre_Referencia'].fillna(df_final['Nombre_CSV'])
         
-        # ALERTA DE SIN RUBRO: Mostramos código y nombre para que sepas exacto a quién agregar al diccionario
         prestadores_sin_rubro = df_final[df_final['Rubro'] == 'SIN RUBRO'][['Ente', 'Prestador']].drop_duplicates()
         if not prestadores_sin_rubro.empty:
             with st.sidebar.expander(f"⚠️ {len(prestadores_sin_rubro)} Entes SIN RUBRO"):
                 st.dataframe(prestadores_sin_rubro, hide_index=True)
 
         # ==========================================
-        # 4. INTERFAZ: TABS, MÉTRICAS Y GRÁFICOS
+        # 4. INTERFAZ: TABS, GRÁFICOS Y TABLAS
         # ==========================================
         if not df_final['Fecha_Obj'].dropna().empty:
             fecha_maxima = df_final['Fecha_Obj'].max()
             fecha_minima = df_final['Fecha_Obj'].min()
+            
             fecha_max_str = fecha_maxima.strftime("%d/%m/%Y")
             fecha_min_str = fecha_minima.strftime("%d/%m/%Y")
             
@@ -1441,10 +1455,10 @@ if archivo_pagos is not None:
         
         def render_tablero(df_mostrar, es_acumulado=False):
             if df_mostrar.empty:
-                st.info("No hay datos para mostrar con los filtros actuales.")
+                st.info("No hay datos para mostrar.")
                 return
 
-            # MÉTRICAS GENERALES 
+            # MÉTTRICAS SUPERIORES
             col_m1, col_m2, col_m3, col_m4 = st.columns(4)
             col_m1.metric("Total Gastado (Bruto)", formatear_moneda(df_mostrar['Imp.OP'].sum()))
             col_m2.metric("Total Gastado (Neto)", formatear_moneda(df_mostrar['Imp.Neto'].sum()))
@@ -1452,7 +1466,7 @@ if archivo_pagos is not None:
             if col_anul:
                 col_m4.metric("Total Imp.Anul.", formatear_moneda(df_mostrar[col_anul].sum()))
             
-            # GRÁFICO EVOLUTIVO DE 4 LÍNEAS (ARRIBA, SÓLO ACUMULADO)
+            # GRÁFICO EVOLUTIVO ARRIBA
             if es_acumulado and not df_mostrar['Fecha_Obj'].dropna().empty:
                 st.markdown("---")
                 st.subheader("Evolución Diaria de Pagos")
@@ -1472,16 +1486,14 @@ if archivo_pagos is not None:
                 fig_evo.update_layout(
                     xaxis_title='Fecha de Pago', yaxis_title='Importe ($)',
                     hovermode='x unified', legend_title='Tipo de Importe',
-                    xaxis=dict(tickformat="%d/%m/%Y"),
-                    yaxis=dict(tickformat="$,.0f"),
-                    separators=",."
+                    xaxis=dict(tickformat="%d/%m/%Y"), yaxis=dict(tickformat="$,.0f"), separators=",."
                 )
                 st.plotly_chart(fig_evo, use_container_width=True)
 
             st.markdown("---")
             st.header("Análisis por Rubro")
             
-            # DESPLEGABLE DE FILTRO DE RUBRO
+            # SELECTOR DE RUBROS
             lista_rubros = ['Todos'] + sorted(df_mostrar['Rubro'].unique().tolist())
             clave_filtro = "filtro_rubro_acum" if es_acumulado else "filtro_rubro_dia"
             rubro_sel = st.selectbox("Seleccioná un rubro para filtrar la tabla y el gráfico:", lista_rubros, key=clave_filtro)
@@ -1492,23 +1504,19 @@ if archivo_pagos is not None:
                     st.warning("No hay pagos para el rubro seleccionado.")
                     return
 
-            # AGRUPACIÓN DE MATRIZ
             df_resumen = df_mostrar.groupby(['Rubro', 'Prestador'])[columnas_dinero].sum().reset_index()
-            # Limpiamos los que suman $0 absoluto para que no ensucien la tabla
             df_resumen = df_resumen[(df_resumen[columnas_dinero] != 0).any(axis=1)]
             
             col_tabla, col_grafico = st.columns([2, 1])
             
             with col_tabla:
-                st.subheader("Matriz Desplegable")
+                st.subheader("Matriz Desplegable por Rubro")
                 gb = GridOptionsBuilder.from_dataframe(df_resumen)
                 gb.configure_column('Rubro', rowGroup=True, hide=True)
-                # Aplicamos el JsCode a las 4 columnas de dinero
+                # Aplicamos el Formateador de JS
                 for col in columnas_dinero:
                     gb.configure_column(col, type=["numericColumn"], valueFormatter=formato_pesos)
                 grid_options = gb.build()
-                
-                # allow_unsafe_jscode=True es clave para que inyecte el formato $ de JsCode
                 AgGrid(df_resumen, gridOptions=grid_options, height=450, theme='streamlit', allow_unsafe_jscode=True)
 
             with col_grafico:
@@ -1530,11 +1538,11 @@ if archivo_pagos is not None:
             render_tablero(df_final, es_acumulado=True)
 
         # ==========================================
-        # 5. BUSCADOR DETALLADO (ABAJO DE TODO)
+        # 5. BUSCADOR DETALLADO 
         # ==========================================
         st.markdown("---")
         st.header("🔍 Buscador Detallado de Prestador")
-        busqueda_texto = st.text_input("Ingresá el nombre o código de ente de un prestador para ver su historial de pagos acumulado:")
+        busqueda_texto = st.text_input("Ingresá el nombre o código de ente de un prestador para ver su historial completo:")
         
         if busqueda_texto:
             df_busq = df_final[df_final['Prestador'].str.contains(busqueda_texto, case=False, na=False) | 
