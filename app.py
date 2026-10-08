@@ -14,10 +14,10 @@ st.title("📊 Tablero de Pagos Diario y Acumulado - ObSBA")
 # ==========================================
 @st.cache_data
 def cargar_diccionario_rubros():
-    archivo_txt = "categorías de prestadores.txt"
+    archivo_txt = "categorias.txt"
     
     if not os.path.exists(archivo_txt):
-        st.error(f"⚠️ No se encontró el archivo '{archivo_txt}'. Asegurate de que el nombre coincida exactamente.")
+        st.error(f"⚠️ No se encontró el archivo '{archivo_txt}'. Asegurate de haberlo subido al repositorio.")
         return pd.DataFrame(columns=['Ente', 'Rubro', 'Nombre_Referencia']), {}
 
     try:
@@ -59,6 +59,7 @@ df_rubros_maestro, dict_nombres = cargar_diccionario_rubros()
 # 2. FUNCIONES DE FORMATO 
 # ==========================================
 def formatear_moneda(valor):
+    """Aplica formato argentino: $ 1.234.567,89"""
     try:
         return f"$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except:
@@ -93,7 +94,7 @@ if archivo_pagos is not None:
             df_pagos = pd.read_excel(archivo_pagos, skiprows=6)
             
         df_pagos.columns = df_pagos.columns.str.strip()
-        df_pagos = df_pagos.dropna(how='all')
+        df_pagos.dropna(how='all', inplace=True)
         
         filtro_basura = df_pagos.astype(str).apply(lambda col: col.str.contains('TOTAL|MEP|Cheque', case=False, na=False)).any(axis=1)
         if filtro_basura.any():
@@ -209,11 +210,11 @@ if archivo_pagos is not None:
             st.markdown("---")
             st.header("Análisis por Rubro")
             
-            # El selector ahora solo afectará a la tabla
             lista_rubros = ['Todos'] + sorted(df_mostrar['Rubro'].unique().tolist())
             clave_filtro = "filtro_rubro_acum" if es_acumulado else "filtro_rubro_dia"
-            rubro_sel = st.selectbox("Seleccioná un rubro para filtrar la tabla:", lista_rubros, key=clave_filtro)
+            rubro_sel = st.selectbox("Seleccioná un rubro (sólo filtrará la tabla desplegable):", lista_rubros, key=clave_filtro)
             
+            # df_tabla se filtra para la Matriz, df_mostrar se mantiene intacto para el Gráfico de Torta
             if rubro_sel != 'Todos':
                 df_tabla = df_mostrar[df_mostrar['Rubro'] == rubro_sel]
             else:
@@ -227,11 +228,12 @@ if archivo_pagos is not None:
                     df_resumen = df_tabla.groupby(['Rubro', 'Prestador'])[columnas_dinero].sum().reset_index()
                     df_resumen = df_resumen[(df_resumen[columnas_dinero] != 0).any(axis=1)]
                     
+                    # Renombramos la columna para que figure explícitamente en la tabla
+                    df_resumen.rename(columns={'Rubro': 'Categoría'}, inplace=True)
+                    
                     gb = GridOptionsBuilder.from_dataframe(df_resumen)
-                    
-                    # Permite ver la categoría además de agruparla
-                    gb.configure_column('Rubro', rowGroup=True, hide=False, header_name="Categoría")
-                    
+                    # Al poner hide=False, la columna se mantiene visible al lado del grupo
+                    gb.configure_column('Categoría', rowGroup=True, hide=False)
                     for col in columnas_dinero:
                         gb.configure_column(col, type=["numericColumn"], valueFormatter=formato_pesos)
                     grid_options = gb.build()
@@ -241,18 +243,23 @@ if archivo_pagos is not None:
 
             with col_grafico:
                 st.subheader("Participación (Bruto)")
-                # El grafico de torta usa 'df_mostrar' entero, ignorando el selectbox de 'rubro_sel'
+                # Utilizamos df_mostrar (sin filtrar) para que la torta siempre quede fija al 100%
                 df_torta = df_mostrar.groupby('Rubro')['Imp.OP'].sum().reset_index()
                 df_torta = df_torta[df_torta['Imp.OP'] > 0]
                 
                 if not df_torta.empty:
-                    # Aplicamos un string customizado a los datos para que el hover muestre la moneda formateada
-                    df_torta['Importe_Formateado'] = df_torta['Imp.OP'].apply(formatear_moneda)
+                    # Aplicamos el formato argentino como un dato extra en el DataFrame del gráfico
+                    df_torta['Monto_Format'] = df_torta['Imp.OP'].apply(formatear_moneda)
                     
                     fig_torta = px.pie(df_torta, values='Imp.OP', names='Rubro', hole=0.4,
-                                       custom_data=['Importe_Formateado'])
-                    fig_torta.update_traces(textposition='inside', textinfo='percent+label', 
-                                            hovertemplate='<b>%{label}</b><br>Monto: %{customdata[0]}')
+                                       custom_data=['Monto_Format'])
+                    
+                    # Inyectamos el customdata formateado en la etiqueta emergente (tooltip)
+                    fig_torta.update_traces(
+                        textposition='inside', 
+                        textinfo='percent+label', 
+                        hovertemplate='<b>%{label}</b><br>Participación: %{percent}<br>Monto: %{customdata[0]}<extra></extra>'
+                    )
                     fig_torta.update_layout(showlegend=False)
                     st.plotly_chart(fig_torta, use_container_width=True)
                 else:
@@ -265,7 +272,7 @@ if archivo_pagos is not None:
             render_tablero(df_final, es_acumulado=True)
 
         # ==========================================
-        # 5. BUSCADOR DETALLADO UBICADO ABAJO
+        # 5. BUSCADOR DETALLADO 
         # ==========================================
         st.markdown("---")
         st.header("🔍 Buscador Detallado de Prestador")
