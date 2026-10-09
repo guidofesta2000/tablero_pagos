@@ -5,6 +5,7 @@ import plotly.express as px
 import plotly.graph_objects as go
 import unicodedata
 import os
+import re
 
 st.set_page_config(page_title="Tablero de Pagos ObSBA", layout="wide")
 st.title("📊 Tablero de Pagos Diario y Acumulado - ObSBA")
@@ -56,14 +57,30 @@ def cargar_diccionario_rubros():
 df_rubros_maestro, dict_nombres = cargar_diccionario_rubros()
 
 # ==========================================
-# 2. FUNCIONES DE FORMATO 
+# 2. FUNCIONES DE FORMATO Y LIMPIEZA
 # ==========================================
 def formatear_moneda(valor):
     try:
-        # Formato argentino: miles con punto, decimales con coma
         return f"$ {valor:,.2f}".replace(",", "X").replace(".", ",").replace("X", ".")
     except:
         return "$ 0,00"
+
+def clean_money(x):
+    if pd.isna(x): return 0.0
+    if isinstance(x, (int, float)): return float(x)
+    x = str(x).upper().replace('$', '').replace(' ', '').replace('ARS', '').strip()
+    if x == '': return 0.0
+    if ',' in x and '.' in x:
+        if x.rfind(',') > x.rfind('.'):
+            x = x.replace('.', '').replace(',', '.')
+        else:
+            x = x.replace(',', '')
+    elif ',' in x:
+        x = x.replace(',', '.')
+    try:
+        return float(x)
+    except:
+        return 0.0
 
 formato_pesos = JsCode(r"""
 function(params) {
@@ -125,9 +142,7 @@ if archivo_pagos is not None:
             
         for col in columnas_dinero:
             if col in df_pagos.columns:
-                if df_pagos[col].dtype == object:
-                    df_pagos[col] = df_pagos[col].astype(str).str.replace('.', '', regex=False).str.replace(',', '.', regex=False)
-                df_pagos[col] = pd.to_numeric(df_pagos[col], errors='coerce').fillna(0.0)
+                df_pagos[col] = df_pagos[col].apply(clean_money)
             else:
                 df_pagos[col] = 0.0 
                 
@@ -177,25 +192,29 @@ if archivo_pagos is not None:
                 st.info("No hay datos para mostrar.")
                 return
 
-            # Selector de rubro como control principal de la solapa
+            st.markdown("---")
+            st.header("Análisis por Rubro")
+            
             lista_rubros = ['Todos'] + sorted(df_mostrar['Rubro'].unique().tolist())
             clave_filtro = "filtro_rubro_acum" if es_acumulado else "filtro_rubro_dia"
             rubro_sel = st.selectbox("Seleccioná un rubro para filtrar las métricas, la tabla y la evolución:", lista_rubros, key=clave_filtro)
             
-            df_reactivo = df_mostrar[df_mostrar['Rubro'] == rubro_sel] if rubro_sel != 'Todos' else df_mostrar
+            if rubro_sel != 'Todos':
+                df_reactivo = df_mostrar[df_mostrar['Rubro'] == rubro_sel]
+            else:
+                df_reactivo = df_mostrar
 
             if df_reactivo.empty:
                 st.warning("No hay pagos para el rubro seleccionado.")
                 return
 
-            # MÉTRICAS REACTIVAS
+            # MÉTTRICAS REACTIVAS AL SELECTOR
             col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-            titulo_metrica = "Total Gastado" if rubro_sel == 'Todos' else f"Gastado ({rubro_sel})"
-            col_m1.metric(f"{titulo_metrica} Bruto", formatear_moneda(df_reactivo['Imp.OP'].sum()))
-            col_m2.metric(f"{titulo_metrica} Neto", formatear_moneda(df_reactivo['Imp.Neto'].sum()))
-            col_m3.metric("Retenciones", formatear_moneda(df_reactivo['Imp.Ret.'].sum()))
+            col_m1.metric("Total Gastado (Bruto)", formatear_moneda(df_reactivo['Imp.OP'].sum()))
+            col_m2.metric("Total Gastado (Neto)", formatear_moneda(df_reactivo['Imp.Neto'].sum()))
+            col_m3.metric("Total Retenciones", formatear_moneda(df_reactivo['Imp.Ret.'].sum()))
             if col_anul:
-                col_m4.metric("Anulaciones", formatear_moneda(df_reactivo[col_anul].sum()))
+                col_m4.metric("Total Imp.Anul.", formatear_moneda(df_reactivo[col_anul].sum()))
             
             # GRÁFICO EVOLUTIVO REACTIVO
             if es_acumulado and not df_reactivo['Fecha_Obj'].dropna().empty:
@@ -221,8 +240,6 @@ if archivo_pagos is not None:
                 )
                 st.plotly_chart(fig_evo, use_container_width=True)
 
-            st.markdown("---")
-            
             col_tabla, col_grafico = st.columns([2, 1])
             
             with col_tabla:
@@ -241,7 +258,7 @@ if archivo_pagos is not None:
 
             with col_grafico:
                 st.subheader("Participación Global (Bruto)")
-                # Gráfico Torta siempre muestra el global (df_mostrar), indiferente a la selección del rubro.
+                # Gráfico Torta siempre muestra el global, indiferente a la selección del rubro.
                 df_torta = df_mostrar.groupby('Rubro')['Imp.OP'].sum().reset_index()
                 df_torta = df_torta[df_torta['Imp.OP'] > 0]
                 
@@ -286,6 +303,12 @@ if archivo_pagos is not None:
                     col_b4.metric("Anulaciones", formatear_moneda(df_busq[col_anul].sum()))
                 
                 df_mostrar_b = df_busq[['Fecha_Obj', 'Ente', 'Prestador', 'Rubro'] + columnas_dinero].copy()
+                
+                # Le aplicamos formato contable también a las columnas del buscador inferior
+                for col in columnas_dinero:
+                    if col in df_mostrar_b.columns:
+                        df_mostrar_b[col] = df_mostrar_b[col].apply(formatear_moneda)
+                        
                 df_mostrar_b['Fecha_Obj'] = df_mostrar_b['Fecha_Obj'].dt.strftime('%d/%m/%Y')
                 df_mostrar_b.rename(columns={'Fecha_Obj': 'Fecha'}, inplace=True)
                 st.dataframe(df_mostrar_b, use_container_width=True)
