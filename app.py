@@ -15,17 +15,22 @@ st.title("📊 Tablero de Pagos Diario y Acumulado - ObSBA")
 # ==========================================
 @st.cache_data
 def cargar_diccionario_rubros():
-    archivo_txt = "categorias.txt"
+    archivo_txt = "categorías de prestadores.txt"
+    archivo_alt = "categorias.txt"
     
-    if not os.path.exists(archivo_txt):
-        st.error(f"⚠️ No se encontró el archivo '{archivo_txt}'. Asegurate de haberlo subido al repositorio.")
+    if os.path.exists(archivo_txt):
+        file_to_load = archivo_txt
+    elif os.path.exists(archivo_alt):
+        file_to_load = archivo_alt
+    else:
+        st.error("⚠️ No se encontró el archivo de categorías. Asegurate de haber subido el txt al repositorio.")
         return pd.DataFrame(columns=['Ente', 'Rubro', 'Nombre_Referencia']), {}
 
     try:
-        with open(archivo_txt, "r", encoding="utf-8") as f:
+        with open(file_to_load, "r", encoding="utf-8") as f:
             lineas = [l.strip() for l in f.readlines() if l.strip()]
     except UnicodeDecodeError:
-        with open(archivo_txt, "r", encoding="latin1") as f:
+        with open(file_to_load, "r", encoding="latin1") as f:
             lineas = [l.strip() for l in f.readlines() if l.strip()]
 
     datos = []
@@ -112,11 +117,14 @@ if archivo_pagos is not None:
             
         df_pagos.columns = df_pagos.columns.str.strip()
         df_pagos.dropna(how='all', inplace=True)
+        df_pagos.reset_index(drop=True, inplace=True)
         
-        filtro_basura = df_pagos.astype(str).apply(lambda col: col.str.contains('TOTAL|MEP|Cheque', case=False, na=False)).any(axis=1)
+        # LA GUILLOTINA: Corta el DataFrame exactamente antes del bloque de Totales
+        filtro_basura = df_pagos.astype(str).apply(lambda col: col.str.contains(r'^\s*(TOTAL|MEP:|Cheque:)', case=False, na=False)).any(axis=1)
         if filtro_basura.any():
-            df_pagos = df_pagos[~filtro_basura].copy()
-            st.sidebar.success("✅ Resumen final excluido.")
+            indice_corte = filtro_basura.idxmax()
+            df_pagos = df_pagos.iloc[:indice_corte].copy()
+            st.sidebar.success("✅ Resumen final de Totales excluido.")
             
         if 'Benef.OP' in df_pagos.columns:
             df_pagos['Ente_Crudo'] = df_pagos['Benef.OP'].astype(str).str.strip()
@@ -199,24 +207,20 @@ if archivo_pagos is not None:
             clave_filtro = "filtro_rubro_acum" if es_acumulado else "filtro_rubro_dia"
             rubro_sel = st.selectbox("Seleccioná un rubro para filtrar las métricas, la tabla y la evolución:", lista_rubros, key=clave_filtro)
             
-            if rubro_sel != 'Todos':
-                df_reactivo = df_mostrar[df_mostrar['Rubro'] == rubro_sel]
-            else:
-                df_reactivo = df_mostrar
+            df_reactivo = df_mostrar[df_mostrar['Rubro'] == rubro_sel] if rubro_sel != 'Todos' else df_mostrar
 
             if df_reactivo.empty:
                 st.warning("No hay pagos para el rubro seleccionado.")
                 return
 
-            # MÉTTRICAS REACTIVAS AL SELECTOR
             col_m1, col_m2, col_m3, col_m4 = st.columns(4)
-            col_m1.metric("Total Gastado (Bruto)", formatear_moneda(df_reactivo['Imp.OP'].sum()))
-            col_m2.metric("Total Gastado (Neto)", formatear_moneda(df_reactivo['Imp.Neto'].sum()))
-            col_m3.metric("Total Retenciones", formatear_moneda(df_reactivo['Imp.Ret.'].sum()))
+            titulo_metrica = "Total Gastado" if rubro_sel == 'Todos' else f"Gastado ({rubro_sel})"
+            col_m1.metric(f"{titulo_metrica} Bruto", formatear_moneda(df_reactivo['Imp.OP'].sum()))
+            col_m2.metric(f"{titulo_metrica} Neto", formatear_moneda(df_reactivo['Imp.Neto'].sum()))
+            col_m3.metric("Retenciones", formatear_moneda(df_reactivo['Imp.Ret.'].sum()))
             if col_anul:
-                col_m4.metric("Total Imp.Anul.", formatear_moneda(df_reactivo[col_anul].sum()))
+                col_m4.metric("Anulaciones", formatear_moneda(df_reactivo[col_anul].sum()))
             
-            # GRÁFICO EVOLUTIVO REACTIVO
             if es_acumulado and not df_reactivo['Fecha_Obj'].dropna().empty:
                 st.markdown("---")
                 st.subheader(f"Evolución Diaria de Pagos" + ("" if rubro_sel == 'Todos' else f" - {rubro_sel}"))
@@ -258,7 +262,6 @@ if archivo_pagos is not None:
 
             with col_grafico:
                 st.subheader("Participación Global (Bruto)")
-                # Gráfico Torta siempre muestra el global, indiferente a la selección del rubro.
                 df_torta = df_mostrar.groupby('Rubro')['Imp.OP'].sum().reset_index()
                 df_torta = df_torta[df_torta['Imp.OP'] > 0]
                 
@@ -303,8 +306,6 @@ if archivo_pagos is not None:
                     col_b4.metric("Anulaciones", formatear_moneda(df_busq[col_anul].sum()))
                 
                 df_mostrar_b = df_busq[['Fecha_Obj', 'Ente', 'Prestador', 'Rubro'] + columnas_dinero].copy()
-                
-                # Le aplicamos formato contable también a las columnas del buscador inferior
                 for col in columnas_dinero:
                     if col in df_mostrar_b.columns:
                         df_mostrar_b[col] = df_mostrar_b[col].apply(formatear_moneda)
