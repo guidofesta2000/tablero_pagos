@@ -15,8 +15,8 @@ st.title("📊 Tablero de Pagos Diario y Acumulado - ObSBA")
 # ==========================================
 @st.cache_data
 def cargar_diccionario_rubros():
-    archivo_txt = "categorías de prestadores.txt"
-    archivo_alt = "categorias.txt"
+    archivo_txt = "categorias.txt"
+    archivo_alt = "categorías de prestadores.txt"
     
     if os.path.exists(archivo_txt):
         file_to_load = archivo_txt
@@ -119,7 +119,7 @@ if archivo_pagos is not None:
         df_pagos.dropna(how='all', inplace=True)
         df_pagos.reset_index(drop=True, inplace=True)
         
-        # LA GUILLOTINA: Corta el DataFrame exactamente antes del bloque de Totales
+        # CORTAR LA TABLA ANTES DE LOS TOTALES (Para que no rompa las escalas)
         filtro_basura = df_pagos.astype(str).apply(lambda col: col.str.contains(r'^\s*(TOTAL|MEP:|Cheque:)', case=False, na=False)).any(axis=1)
         if filtro_basura.any():
             indice_corte = filtro_basura.idxmax()
@@ -213,6 +213,7 @@ if archivo_pagos is not None:
                 st.warning("No hay pagos para el rubro seleccionado.")
                 return
 
+            # MÉTTRICAS REACTIVAS AL SELECTOR
             col_m1, col_m2, col_m3, col_m4 = st.columns(4)
             titulo_metrica = "Total Gastado" if rubro_sel == 'Todos' else f"Gastado ({rubro_sel})"
             col_m1.metric(f"{titulo_metrica} Bruto", formatear_moneda(df_reactivo['Imp.OP'].sum()))
@@ -221,6 +222,7 @@ if archivo_pagos is not None:
             if col_anul:
                 col_m4.metric("Anulaciones", formatear_moneda(df_reactivo[col_anul].sum()))
             
+            # GRÁFICO EVOLUTIVO REACTIVO
             if es_acumulado and not df_reactivo['Fecha_Obj'].dropna().empty:
                 st.markdown("---")
                 st.subheader(f"Evolución Diaria de Pagos" + ("" if rubro_sel == 'Todos' else f" - {rubro_sel}"))
@@ -262,6 +264,7 @@ if archivo_pagos is not None:
 
             with col_grafico:
                 st.subheader("Participación Global (Bruto)")
+                # Gráfico Torta siempre muestra el global, indiferente a la selección del rubro.
                 df_torta = df_mostrar.groupby('Rubro')['Imp.OP'].sum().reset_index()
                 df_torta = df_torta[df_torta['Imp.OP'] > 0]
                 
